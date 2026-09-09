@@ -1,0 +1,60 @@
+name: 5. Keep Alive
+run-name: Keep Alive (${{ github.ref_name }})
+
+# Fork-only addition (not present in upstream LoopKit/LoopWorkspace).
+#
+# GitHub disables scheduled workflows in PUBLIC repositories after 60 days
+# without repository activity. Upstream `main` can go quiet for longer than
+# that, so nothing gets synced into this fork, "4. Build Loop" is silently
+# switched off, and the TestFlight build on the phone expires 90 days after
+# the last upload.
+#
+# This workflow runs weekly and:
+#   1. re-enables "4. Build Loop" in case GitHub already disabled it;
+#   2. if the repository has had no push for IDLE_DAYS_THRESHOLD days, pushes
+#      an empty commit to the throwaway `alive-<branch>` branch, which counts
+#      as repository activity and resets GitHub's 60-day timer.
+#
+# It never touches `main`, so the weekly upstream sync keeps merging cleanly.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 6 * * 1" # Mondays at UTC 06:17
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  keepalive:
+    name: Keep repository active
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      IDLE_DAYS_THRESHOLD: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Re-enable Build Loop if GitHub disabled it for inactivity
+        run: gh workflow enable build_loop.yml --repo "$GITHUB_REPOSITORY"
+
+      - name: Push empty commit to alive branch if repository is idle
+        run: |
+          PUSHED_AT=$(gh api "repos/$GITHUB_REPOSITORY" --jq .pushed_at)
+          IDLE_DAYS=$(( ( $(date +%s) - $(date -d "$PUSHED_AT" +%s) ) / 86400 ))
+          echo "Last push to repository: $PUSHED_AT ($IDLE_DAYS days ago)"
+
+          if [ "$IDLE_DAYS" -lt "$IDLE_DAYS_THRESHOLD" ]; then
+            echo "Repository was active within the last $IDLE_DAYS_THRESHOLD days; nothing to do."
+            exit 0
+          fi
+
+          ALIVE_BRANCH="alive-${GITHUB_REF_NAME}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$ALIVE_BRANCH"
+          git commit --allow-empty -m "chore: keep repository active ($(date -u +%F))"
+          git push --force origin "$ALIVE_BRANCH"
+          echo "::notice::Repository was idle for $IDLE_DAYS days; pushed keepalive commit to $ALIVE_BRANCH."
